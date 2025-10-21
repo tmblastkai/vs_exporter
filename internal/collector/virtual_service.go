@@ -11,11 +11,17 @@ import (
 	"k8s.io/client-go/dynamic"
 )
 
-var virtualServiceGVR = schema.GroupVersionResource{
-	Group:    "networking.istio.io",
-	Version:  "v1beta1",
-	Resource: "virtualservices",
-}
+var (
+	virtualServiceGVR = schema.GroupVersionResource{
+		Group:    "networking.istio.io",
+		Version:  "v1beta1",
+		Resource: "virtualservices",
+	}
+	namespaceGVR = schema.GroupVersionResource{
+		Version:  "v1",
+		Resource: "namespaces",
+	}
+)
 
 // VirtualServiceCollector periodically refreshes metrics describing Istio VirtualServices.
 type VirtualServiceCollector struct {
@@ -69,17 +75,27 @@ func (c *VirtualServiceCollector) Run(ctx context.Context, interval time.Duratio
 }
 
 func (c *VirtualServiceCollector) update(ctx context.Context) error {
-	list, err := c.client.Resource(virtualServiceGVR).List(ctx, metav1.ListOptions{})
+	namespaces, err := c.client.Resource(namespaceGVR).List(ctx, metav1.ListOptions{
+		LabelSelector: "product",
+	})
 	if err != nil {
 		return err
 	}
 
 	c.metric.Reset()
 
-	for _, item := range list.Items {
-		namespace := item.GetNamespace()
-		name := item.GetName()
-		c.metric.WithLabelValues(namespace, name).Set(1)
+	for _, namespace := range namespaces.Items {
+		nsName := namespace.GetName()
+
+		list, err := c.client.Resource(virtualServiceGVR).Namespace(nsName).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return err
+		}
+
+		for _, item := range list.Items {
+			name := item.GetName()
+			c.metric.WithLabelValues(nsName, name).Set(1)
+		}
 	}
 
 	return nil
