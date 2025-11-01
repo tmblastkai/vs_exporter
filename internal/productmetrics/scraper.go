@@ -19,19 +19,20 @@ import (
 
 const (
 	namespaceLabelKey = "namespace"
-	productLabel      = "product"
 	requestTimeout    = 10 * time.Second
 )
 
 // Scraper periodically gathers metrics from product pods and updates the provided store.
 type Scraper struct {
-	clientset   kubernetes.Interface
-	httpClient  *http.Client
-	store       *Store
-	interval    time.Duration
-	port        int
-	metricsPath string
-	logger      Logger
+	clientset         kubernetes.Interface
+	httpClient        *http.Client
+	store             *Store
+	interval          time.Duration
+	port              int
+	metricsPath       string
+	namespaceSelector string
+	podSelector       string
+	logger            Logger
 }
 
 // Logger captures log messages emitted by the scraper loop.
@@ -52,19 +53,23 @@ func NewScraper(
 	interval time.Duration,
 	port int,
 	metricsPath string,
+	namespaceSelector string,
+	podSelector string,
 	logger Logger,
 ) *Scraper {
 	if logger == nil {
 		logger = nopLogger{}
 	}
 	return &Scraper{
-		clientset:   clientset,
-		httpClient:  httpClient,
-		store:       store,
-		interval:    interval,
-		port:        port,
-		metricsPath: metricsPath,
-		logger:      logger,
+		clientset:         clientset,
+		httpClient:        httpClient,
+		store:             store,
+		interval:          interval,
+		port:              port,
+		metricsPath:       metricsPath,
+		namespaceSelector: namespaceSelector,
+		podSelector:       podSelector,
+		logger:            logger,
 	}
 }
 
@@ -88,7 +93,7 @@ func (s *Scraper) Run(ctx context.Context) {
 
 // ScrapeOnce discovers labelled pods and refreshes the stored metrics.
 func (s *Scraper) ScrapeOnce(ctx context.Context) error {
-	nsList, err := s.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: productLabel})
+	nsList, err := s.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: s.namespaceSelector})
 	if err != nil {
 		return fmt.Errorf("list namespaces: %w", err)
 	}
@@ -97,7 +102,7 @@ func (s *Scraper) ScrapeOnce(ctx context.Context) error {
 	var errs []error
 
 	for _, ns := range nsList.Items {
-		pods, err := s.clientset.CoreV1().Pods(ns.Name).List(ctx, metav1.ListOptions{LabelSelector: productLabel})
+		pods, err := s.clientset.CoreV1().Pods(ns.Name).List(ctx, metav1.ListOptions{LabelSelector: s.podSelector})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("list pods in namespace %s: %w", ns.Name, err))
 			continue

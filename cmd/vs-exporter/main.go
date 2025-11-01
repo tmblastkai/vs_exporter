@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/expfmt"
 	"istio.io/client-go/pkg/clientset/versioned"
 	"k8s.io/client-go/kubernetes"
@@ -28,6 +29,12 @@ const (
 	defaultScrapePort = 1234
 	// defaultMetricsPath 是產品微服務預設的 metrics HTTP path。
 	defaultMetricsPath = "/metrics"
+	// internalMetricsAddress 是 Go runtime/promhttp 預設指標的額外曝光端口。
+	internalMetricsAddress = ":8123"
+	// defaultNamespaceSelector 定義用來挑選目標 namespace 的預設 label selector。
+	defaultNamespaceSelector = "product"
+	// defaultPodSelector 定義用來挑選目標 pod 的預設 label selector。
+	defaultPodSelector = "product"
 )
 
 func main() {
@@ -37,6 +44,8 @@ func main() {
 	productInterval := flag.Duration("product-interval", 5*time.Minute, "Interval between product metric refreshes")
 	productPort := flag.Int("scrape-port", defaultScrapePort, "Pod port to scrape product metrics from")
 	productMetricsPath := flag.String("metrics-path", defaultMetricsPath, "Pod product metrics HTTP path")
+	namespaceSelector := flag.String("namespace-selector", defaultNamespaceSelector, "Label selector used to find namespaces with product metrics pods")
+	podSelector := flag.String("pod-selector", defaultPodSelector, "Label selector used to find product metrics pods inside each namespace")
 	flag.Parse()
 
 	// 建立 Kubernetes REST Config，優先採用 in-cluster 設定，否則回退到 kubeconfig。
@@ -82,6 +91,8 @@ func main() {
 		*productInterval,
 		*productPort,
 		*productMetricsPath,
+		*namespaceSelector,
+		*podSelector,
 		log.Default(),
 	)
 	go productScraper.Run(ctx)
@@ -125,6 +136,10 @@ func main() {
 		Addr:    *listenAddress,
 		Handler: mux,
 	}
+	internalSrv := &http.Server{
+		Addr:    internalMetricsAddress,
+		Handler: promhttp.Handler(),
+	}
 
 	go func() {
 		// 等待 context 結束時，發起優雅關閉，避免中斷中的請求。
@@ -134,9 +149,19 @@ func main() {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("error while shutting down HTTP server: %v", err)
 		}
+		if err := internalSrv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("error while shutting down internal metrics server: %v", err)
+		}
+	}()
+
+	go func() {
+		if err := internalSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("internal metrics server error: %v", err)
+		}
 	}()
 
 	log.Printf("serving metrics at %s/metrics", *listenAddress)
+	log.Printf("serving Go runtime metrics at %s/metrics", internalMetricsAddress)
 
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("HTTP server error: %v", err)
