@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -9,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	v1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	istio "istio.io/client-go/pkg/clientset/versioned"
 )
 
@@ -30,9 +32,9 @@ func NewVirtualServiceCollector(kubeClient kubernetes.Interface, istioClient ist
 		metric: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "istio_virtual_service_info",
-				Help: "Information about Istio VirtualService resources, labelled by namespace and name.",
+				Help: "Information about Istio VirtualService resources, labelled by namespace, virtual service, and referenced gateway.",
 			},
-			[]string{"namespace", "virtual_service"},
+			[]string{"namespace", "virtual_service", "gateway"},
 		),
 		updateCount: prometheus.NewCounter(
 			prometheus.CounterOpts{
@@ -88,19 +90,143 @@ func (c *VirtualServiceCollector) update(ctx context.Context) error {
 
 	c.metric.Reset()
 
+	gatewayCache := make(map[string]map[string]*v1beta1.Gateway)
+
 	for _, namespace := range namespaces.Items {
 		nsName := namespace.GetName()
+		if _, err := c.ensureGatewaysCached(ctx, nsName, gatewayCache); err != nil {
+			return err
+		}
 
-		list, err := c.istioClient.NetworkingV1beta1().VirtualServices(nsName).List(ctx, metav1.ListOptions{})
+		vsList, err := c.istioClient.NetworkingV1beta1().VirtualServices(nsName).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return err
 		}
 
-		for _, item := range list.Items {
-			name := item.GetName()
-			c.metric.WithLabelValues(nsName, name).Set(1)
+		for _, vs := range vsList.Items {
+			if vs == nil {
+				continue
+			}
+
+			gateways := vs.Spec.Gateways
+			if len(gateways) == 0 {
+				gateways = []string{"mesh"}
+			}
+
+			for _, gatewayRef := range gateways {
+				labelGateway := gatewayRef
+				value := 1.0
+
+				if gatewayRef == "" {
+					value = 0
+				} else if gatewayRef == "mesh" {
+					// mesh gateway is virtual; assume healthy
+					value = 1
+				} else {
+					gwNamespace := nsName
+					gwName := gatewayRef
+
+					if strings.Contains(gatewayRef, "/") {
+						parts := strings.SplitN(gatewayRef, "/", 2)
+						if len(parts) == 2 {
+							gwNamespace = parts[0]
+							gwName = parts[1]
+						}
+					}
+
+					nsGateways, err := c.ensureGatewaysCached(ctx, gwNamespace, gatewayCache)
+					if err != nil {
+						return err
+					}
+
+					if len(nsGateways) == 0 {
+						value = 0
+					} else {
+						gateway, ok := nsGateways[gwName]
+						if !ok {
+							value = 0
+						} else if !hostsCompatible(vs.Spec.Hosts, gateway) {
+							value = 0
+						}
+					}
+				}
+
+				c.metric.WithLabelValues(nsName, vs.GetName(), labelGateway).Set(value)
+			}
 		}
 	}
 
 	return nil
+}
+
+func (c *VirtualServiceCollector) ensureGatewaysCached(ctx context.Context, namespace string, cache map[string]map[string]*v1beta1.Gateway) (map[string]*v1beta1.Gateway, error) {
+	if namespace == "" {
+		return nil, nil
+	}
+
+	if gateways, ok := cache[namespace]; ok {
+		return gateways, nil
+	}
+
+	list, err := c.istioClient.NetworkingV1beta1().Gateways(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]*v1beta1.Gateway, len(list.Items))
+	for _, gateway := range list.Items {
+		if gateway == nil {
+			continue
+		}
+		result[gateway.GetName()] = gateway
+	}
+
+	cache[namespace] = result
+	return result, nil
+}
+
+func hostsCompatible(vsHosts []string, gateway *v1beta1.Gateway) bool {
+	if gateway == nil {
+		return false
+	}
+
+	if len(vsHosts) == 0 {
+		return true
+	}
+
+	var gatewayHosts []string
+	for _, server := range gateway.Spec.Servers {
+		if server == nil {
+			continue
+		}
+		gatewayHosts = append(gatewayHosts, server.Hosts...)
+	}
+
+	if len(gatewayHosts) == 0 {
+		return false
+	}
+
+	for _, vsHost := range vsHosts {
+		for _, gwHost := range gatewayHosts {
+			if hostMatches(gwHost, vsHost) || hostMatches(vsHost, gwHost) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func hostMatches(pattern, host string) bool {
+	if pattern == "" {
+		return false
+	}
+	if pattern == "*" || pattern == host {
+		return true
+	}
+	if strings.HasPrefix(pattern, "*.") {
+		suffix := strings.TrimPrefix(pattern, "*")
+		return strings.HasSuffix(host, suffix)
+	}
+	return false
 }
