@@ -42,9 +42,12 @@ func main() {
 		appLogger.Fatalf("failed to build Kubernetes configuration: %v", err)
 	}
 
-	istioClient, err := versioned.NewForConfig(cfgKube)
-	if err != nil {
-		appLogger.Fatalf("failed to create Istio clientset: %v", err)
+	var istioClient *versioned.Clientset
+	if cfg.EnableVirtualServiceScrapeJob {
+		istioClient, err = versioned.NewForConfig(cfgKube)
+		if err != nil {
+			appLogger.Fatalf("failed to create Istio clientset: %v", err)
+		}
 	}
 
 	clientset, err := kubernetes.NewForConfig(cfgKube)
@@ -52,8 +55,11 @@ func main() {
 		appLogger.Fatalf("failed to create Kubernetes clientset: %v", err)
 	}
 
-	vsCollector := collector.NewVirtualServiceCollector(clientset, istioClient)
-	prometheus.MustRegister(vsCollector)
+	var vsCollector *collector.VirtualServiceCollector
+	if cfg.EnableVirtualServiceScrapeJob {
+		vsCollector = collector.NewVirtualServiceCollector(clientset, istioClient)
+		prometheus.MustRegister(vsCollector)
+	}
 
 	store := productmetrics.NewStore()
 	httpClient := &http.Client{
@@ -63,30 +69,36 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	go vsCollector.Run(ctx, cfg.VirtualServiceInterval)
+	if cfg.EnableVirtualServiceScrapeJob {
+		go vsCollector.Run(ctx, cfg.VirtualServiceInterval)
+	}
 
-	for _, target := range cfg.ProductMetrics {
-		appLogger.WithField("target", target.Name).Infof("configuring product metrics scraper interval=%s port=%d path=%s namespaceSelector=%q podSelector=%q",
-			target.Interval, target.Port, target.Path, target.NamespaceSelector, target.PodSelector)
+	if len(cfg.ProductMetrics) == 0 {
+		appLogger.Warn("no product metrics targets configured; exposing only existing metrics")
+	} else {
+		for _, target := range cfg.ProductMetrics {
+			appLogger.WithField("target", target.Name).Infof("configuring product metrics scraper interval=%s port=%d path=%s namespaceSelector=%q podSelector=%q",
+				target.Interval, target.Port, target.Path, target.NamespaceSelector, target.PodSelector)
 
-		scraperLogger := logrus.WithFields(logrus.Fields{
-			"component": "product-scraper",
-			"target":    target.Name,
-		})
+			scraperLogger := logrus.WithFields(logrus.Fields{
+				"component": "product-scraper",
+				"target":    target.Name,
+			})
 
-		scraper := productmetrics.NewScraper(
-			target.Name,
-			clientset,
-			httpClient,
-			store,
-			target.Interval,
-			target.Port,
-			target.Path,
-			target.NamespaceSelector,
-			target.PodSelector,
-			scraperLogger,
-		)
-		go scraper.Run(ctx)
+			scraper := productmetrics.NewScraper(
+				target.Name,
+				clientset,
+				httpClient,
+				store,
+				target.Interval,
+				target.Port,
+				target.Path,
+				target.NamespaceSelector,
+				target.PodSelector,
+				scraperLogger,
+			)
+			go scraper.Run(ctx)
+		}
 	}
 
 	mux := http.NewServeMux()

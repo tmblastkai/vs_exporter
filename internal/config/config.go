@@ -10,10 +10,11 @@ import (
 
 // Config 描述整體服務的設定項目。
 type Config struct {
-	ListenAddress          string
-	InternalMetricsAddress string
-	VirtualServiceInterval time.Duration
-	ProductMetrics         []ProductMetricsTarget
+	ListenAddress                 string
+	InternalMetricsAddress        string
+	VirtualServiceInterval        time.Duration
+	EnableVirtualServiceScrapeJob bool
+	ProductMetrics                []ProductMetricsTarget
 }
 
 // ProductMetricsTarget 敘述單一產品指標抓取器的參數。
@@ -27,10 +28,11 @@ type ProductMetricsTarget struct {
 }
 
 type rawConfig struct {
-	ListenAddress          string             `yaml:"listenAddress"`
-	InternalMetricsAddress string             `yaml:"internalMetricsAddress"`
-	VirtualServiceInterval string             `yaml:"virtualServiceInterval"`
-	ProductMetrics         []rawProductTarget `yaml:"productMetrics"`
+	ListenAddress                 string             `yaml:"listenAddress"`
+	InternalMetricsAddress        string             `yaml:"internalMetricsAddress"`
+	VirtualServiceInterval        string             `yaml:"virtualServiceInterval"`
+	EnableVirtualServiceScrapeJob *bool              `yaml:"enableVirtualServiceScrapeJob"`
+	ProductMetrics                []rawProductTarget `yaml:"productMetrics"`
 }
 
 type rawProductTarget struct {
@@ -68,8 +70,9 @@ func Load(path string) (Config, error) {
 
 func convertRaw(raw rawConfig) (Config, error) {
 	cfg := Config{
-		ListenAddress:          raw.ListenAddress,
-		InternalMetricsAddress: raw.InternalMetricsAddress,
+		ListenAddress:                 raw.ListenAddress,
+		InternalMetricsAddress:        raw.InternalMetricsAddress,
+		EnableVirtualServiceScrapeJob: true,
 	}
 
 	if raw.VirtualServiceInterval == "" {
@@ -80,6 +83,10 @@ func convertRaw(raw rawConfig) (Config, error) {
 		return Config{}, fmt.Errorf("parse virtualServiceInterval: %w", err)
 	}
 	cfg.VirtualServiceInterval = interval
+
+	if raw.EnableVirtualServiceScrapeJob != nil {
+		cfg.EnableVirtualServiceScrapeJob = *raw.EnableVirtualServiceScrapeJob
+	}
 
 	cfg.ProductMetrics = make([]ProductMetricsTarget, len(raw.ProductMetrics))
 	for i, target := range raw.ProductMetrics {
@@ -110,13 +117,9 @@ func (c Config) validate() error {
 	if c.InternalMetricsAddress == "" {
 		return fmt.Errorf("internalMetricsAddress is required")
 	}
-	if c.VirtualServiceInterval <= 0 {
-		return fmt.Errorf("virtualServiceInterval must be positive")
+	if c.EnableVirtualServiceScrapeJob && c.VirtualServiceInterval <= 0 {
+		return fmt.Errorf("virtualServiceInterval must be positive when enableVirtualServiceScrapeJob is true")
 	}
-	if len(c.ProductMetrics) == 0 {
-		return fmt.Errorf("productMetrics must contain at least one target")
-	}
-
 	for i, target := range c.ProductMetrics {
 		if target.Name == "" {
 			return fmt.Errorf("productMetrics[%d].name is required", i)

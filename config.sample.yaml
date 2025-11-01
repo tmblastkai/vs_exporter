@@ -1,6 +1,7 @@
 listenAddress: ":8081"
 internalMetricsAddress: ":8123"
 virtualServiceInterval: "5m"
+enableVirtualServiceScrapeJob: true
 
 productMetrics:
   - name: product-a
