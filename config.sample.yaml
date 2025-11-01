@@ -1,0 +1,10 @@
+listenAddress: ":8081"
+internalMetricsAddress: ":8123"
+virtualServiceInterval: 5m
+
+productMetrics:
+  interval: 5m
+  port: 1234
+  path: /metrics
+  namespaceSelector: product
+  podSelector: product
