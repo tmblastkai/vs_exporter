@@ -8,27 +8,17 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-const (
-	defaultListenAddress          = ":8081"
-	defaultInternalMetricsAddress = ":8123"
-	defaultScrapePort             = 1234
-	defaultMetricsPath            = "/metrics"
-	defaultNamespaceSelector      = "product"
-	defaultPodSelector            = "product"
-	defaultVirtualServiceInterval = 5 * time.Minute
-	defaultProductInterval        = 5 * time.Minute
-)
-
 // Config 描述整體服務的設定項目。
 type Config struct {
-	ListenAddress          string               `yaml:"listenAddress"`
-	InternalMetricsAddress string               `yaml:"internalMetricsAddress"`
-	VirtualServiceInterval time.Duration        `yaml:"virtualServiceInterval"`
-	ProductMetrics         ProductMetricsConfig `yaml:"productMetrics"`
+	ListenAddress          string                 `yaml:"listenAddress"`
+	InternalMetricsAddress string                 `yaml:"internalMetricsAddress"`
+	VirtualServiceInterval time.Duration          `yaml:"virtualServiceInterval"`
+	ProductMetrics         []ProductMetricsTarget `yaml:"productMetrics"`
 }
 
-// ProductMetricsConfig 敘述產品指標抓取相關的參數。
-type ProductMetricsConfig struct {
+// ProductMetricsTarget 敘述單一產品指標抓取器的參數。
+type ProductMetricsTarget struct {
+	Name              string        `yaml:"name"`
 	Interval          time.Duration `yaml:"interval"`
 	Port              int           `yaml:"port"`
 	Path              string        `yaml:"path"`
@@ -36,7 +26,7 @@ type ProductMetricsConfig struct {
 	PodSelector       string        `yaml:"podSelector"`
 }
 
-// Load 從指定路徑讀取設定並補齊預設值。
+// Load 從指定路徑讀取設定。
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -48,34 +38,47 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("unmarshal config: %w", err)
 	}
 
-	cfg.applyDefaults()
+	if err := cfg.validate(); err != nil {
+		return Config{}, err
+	}
+
 	return cfg, nil
 }
 
-func (c *Config) applyDefaults() {
+func (c Config) validate() error {
 	if c.ListenAddress == "" {
-		c.ListenAddress = defaultListenAddress
+		return fmt.Errorf("listenAddress is required")
 	}
 	if c.InternalMetricsAddress == "" {
-		c.InternalMetricsAddress = defaultInternalMetricsAddress
+		return fmt.Errorf("internalMetricsAddress is required")
 	}
-	if c.VirtualServiceInterval == 0 {
-		c.VirtualServiceInterval = defaultVirtualServiceInterval
+	if c.VirtualServiceInterval <= 0 {
+		return fmt.Errorf("virtualServiceInterval must be positive")
+	}
+	if len(c.ProductMetrics) == 0 {
+		return fmt.Errorf("productMetrics must contain at least one target")
 	}
 
-	if c.ProductMetrics.Interval == 0 {
-		c.ProductMetrics.Interval = defaultProductInterval
+	for i, target := range c.ProductMetrics {
+		if target.Name == "" {
+			return fmt.Errorf("productMetrics[%d].name is required", i)
+		}
+		if target.Interval <= 0 {
+			return fmt.Errorf("productMetrics[%d].interval must be positive", i)
+		}
+		if target.Port <= 0 {
+			return fmt.Errorf("productMetrics[%d].port must be positive", i)
+		}
+		if target.Path == "" {
+			return fmt.Errorf("productMetrics[%d].path is required", i)
+		}
+		if target.NamespaceSelector == "" {
+			return fmt.Errorf("productMetrics[%d].namespaceSelector is required", i)
+		}
+		if target.PodSelector == "" {
+			return fmt.Errorf("productMetrics[%d].podSelector is required", i)
+		}
 	}
-	if c.ProductMetrics.Port == 0 {
-		c.ProductMetrics.Port = defaultScrapePort
-	}
-	if c.ProductMetrics.Path == "" {
-		c.ProductMetrics.Path = defaultMetricsPath
-	}
-	if c.ProductMetrics.NamespaceSelector == "" {
-		c.ProductMetrics.NamespaceSelector = defaultNamespaceSelector
-	}
-	if c.ProductMetrics.PodSelector == "" {
-		c.ProductMetrics.PodSelector = defaultPodSelector
-	}
+
+	return nil
 }

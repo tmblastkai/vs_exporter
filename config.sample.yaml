@@ -3,8 +3,15 @@ internalMetricsAddress: ":8123"
 virtualServiceInterval: 5m
 
 productMetrics:
-  interval: 5m
-  port: 1234
-  path: /metrics
-  namespaceSelector: product
-  podSelector: product
+  - name: product-a
+    interval: 5m
+    port: 1234
+    path: /metrics
+    namespaceSelector: product=alpha
+    podSelector: product=alpha
+  - name: product-b
+    interval: 2m
+    port: 1234
+    path: /metrics
+    namespaceSelector: product=beta
+    podSelector: product=beta

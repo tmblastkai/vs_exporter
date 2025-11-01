@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -60,18 +62,26 @@ func main() {
 
 	go vsCollector.Run(ctx, cfg.VirtualServiceInterval)
 
-	productScraper := productmetrics.NewScraper(
-		clientset,
-		httpClient,
-		store,
-		cfg.ProductMetrics.Interval,
-		cfg.ProductMetrics.Port,
-		cfg.ProductMetrics.Path,
-		cfg.ProductMetrics.NamespaceSelector,
-		cfg.ProductMetrics.PodSelector,
-		log.Default(),
-	)
-	go productScraper.Run(ctx)
+	for _, target := range cfg.ProductMetrics {
+		var scraperLogger productmetrics.Logger = log.Default()
+		if target.Name != "" {
+			scraperLogger = log.New(os.Stdout, fmt.Sprintf("[%s] ", target.Name), log.LstdFlags)
+		}
+
+		scraper := productmetrics.NewScraper(
+			target.Name,
+			clientset,
+			httpClient,
+			store,
+			target.Interval,
+			target.Port,
+			target.Path,
+			target.NamespaceSelector,
+			target.PodSelector,
+			scraperLogger,
+		)
+		go scraper.Run(ctx)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {

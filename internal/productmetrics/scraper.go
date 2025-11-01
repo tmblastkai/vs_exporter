@@ -24,6 +24,7 @@ const (
 
 // Scraper periodically gathers metrics from product pods and updates the provided store.
 type Scraper struct {
+	targetName        string
 	clientset         kubernetes.Interface
 	httpClient        *http.Client
 	store             *Store
@@ -47,6 +48,7 @@ func (nopLogger) Printf(string, ...interface{}) {}
 // NewScraper constructs a Scraper responsible for discovering labelled pods and
 // aggregating their exposed Prometheus metrics.
 func NewScraper(
+	targetName string,
 	clientset kubernetes.Interface,
 	httpClient *http.Client,
 	store *Store,
@@ -61,6 +63,7 @@ func NewScraper(
 		logger = nopLogger{}
 	}
 	return &Scraper{
+		targetName:        targetName,
 		clientset:         clientset,
 		httpClient:        httpClient,
 		store:             store,
@@ -119,7 +122,7 @@ func (s *Scraper) ScrapeOnce(ctx context.Context) error {
 		}
 	}
 
-	s.store.Replace(newFamilies)
+	s.store.Replace(s.targetName, newFamilies)
 
 	return errors.Join(errs...)
 }
