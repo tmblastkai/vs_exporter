@@ -2,15 +2,17 @@ package collector
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
 	istio "istio.io/client-go/pkg/clientset/versioned"
 )
+
+const vsCollectorLogPrefix = "[VirtualServiceCollector]"
 
 // VirtualServiceCollector periodically refreshes metrics describing Istio VirtualServices.
 type VirtualServiceCollector struct {
@@ -56,7 +58,7 @@ func (c *VirtualServiceCollector) Collect(ch chan<- prometheus.Metric) {
 // Run refreshes VirtualService metrics until the context is cancelled.
 func (c *VirtualServiceCollector) Run(ctx context.Context, interval time.Duration) {
 	if err := c.update(ctx); err != nil && ctx.Err() == nil {
-		log.Printf("unable to update VirtualService metrics: %v", err)
+		logrus.WithField("component", vsCollectorLogPrefix).Warnf("unable to update VirtualService metrics: %v", err)
 	}
 
 	ticker := time.NewTicker(interval)
@@ -68,7 +70,7 @@ func (c *VirtualServiceCollector) Run(ctx context.Context, interval time.Duratio
 			return
 		case <-ticker.C:
 			if err := c.update(ctx); err != nil && ctx.Err() == nil {
-				log.Printf("unable to update VirtualService metrics: %v", err)
+				logrus.WithField("component", vsCollectorLogPrefix).Warnf("unable to update VirtualService metrics: %v", err)
 			}
 		}
 	}

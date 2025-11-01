@@ -12,6 +12,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -33,17 +34,8 @@ type Scraper struct {
 	metricsPath       string
 	namespaceSelector string
 	podSelector       string
-	logger            Logger
+	logger            logrus.FieldLogger
 }
-
-// Logger captures log messages emitted by the scraper loop.
-type Logger interface {
-	Printf(format string, v ...interface{})
-}
-
-type nopLogger struct{}
-
-func (nopLogger) Printf(string, ...interface{}) {}
 
 // NewScraper constructs a Scraper responsible for discovering labelled pods and
 // aggregating their exposed Prometheus metrics.
@@ -57,10 +49,10 @@ func NewScraper(
 	metricsPath string,
 	namespaceSelector string,
 	podSelector string,
-	logger Logger,
+	logger logrus.FieldLogger,
 ) *Scraper {
 	if logger == nil {
-		logger = nopLogger{}
+		logger = logrus.WithField("component", "product-scraper")
 	}
 	return &Scraper{
 		targetName:        targetName,
@@ -80,14 +72,16 @@ func NewScraper(
 func (s *Scraper) Run(ctx context.Context) {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
+	s.logger.Infof("scraper started: interval=%s port=%d path=%s namespaceSelector=%q podSelector=%q", s.interval, s.port, s.metricsPath, s.namespaceSelector, s.podSelector)
 
 	for {
 		if err := s.ScrapeOnce(ctx); err != nil {
-			s.logger.Printf("scrape failed: %v", err)
+			s.logger.Errorf("scrape failed: %v", err)
 		}
 
 		select {
 		case <-ctx.Done():
+			s.logger.Infof("scraper stopping")
 			return
 		case <-ticker.C:
 		}
@@ -96,6 +90,7 @@ func (s *Scraper) Run(ctx context.Context) {
 
 // ScrapeOnce discovers labelled pods and refreshes the stored metrics.
 func (s *Scraper) ScrapeOnce(ctx context.Context) error {
+	s.logger.Debugf("scrape cycle start")
 	nsList, err := s.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: s.namespaceSelector})
 	if err != nil {
 		return fmt.Errorf("list namespaces: %w", err)
@@ -116,6 +111,7 @@ func (s *Scraper) ScrapeOnce(ctx context.Context) error {
 			if pod.Status.PodIP == "" {
 				continue
 			}
+			s.logger.Debugf("scraping pod %s/%s via %s:%d%s", ns.Name, pod.Name, pod.Status.PodIP, s.port, s.metricsPath)
 			if err := s.scrapePod(ctx, pod, ns.Name, newFamilies); err != nil {
 				errs = append(errs, fmt.Errorf("scrape pod %s/%s: %w", ns.Name, pod.Name, err))
 			}
@@ -123,6 +119,12 @@ func (s *Scraper) ScrapeOnce(ctx context.Context) error {
 	}
 
 	s.store.Replace(s.targetName, newFamilies)
+
+	if len(errs) == 0 {
+		s.logger.Infof("scrape cycle succeeded for target=%s namespaces=%d", s.targetName, len(nsList.Items))
+	} else {
+		s.logger.Warnf("scrape cycle completed with %d errors for target=%s", len(errs), s.targetName)
+	}
 
 	return errors.Join(errs...)
 }

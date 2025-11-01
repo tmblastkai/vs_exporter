@@ -5,10 +5,7 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"fmt"
-	"log"
 	"net/http"
-	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -16,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/expfmt"
+	"github.com/sirupsen/logrus"
 	"istio.io/client-go/pkg/clientset/versioned"
 	"k8s.io/client-go/kubernetes"
 
@@ -29,24 +27,29 @@ func main() {
 	configPath := flag.String("config", "config.yaml", "Path to config file")
 	flag.Parse()
 
+	logrus.SetFormatter(&logrus.TextFormatter{
+		FullTimestamp: true,
+	})
+	appLogger := logrus.WithField("component", "vs-exporter")
+
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		appLogger.Fatalf("failed to load config: %v", err)
 	}
 
 	cfgKube, err := kube.BuildConfig()
 	if err != nil {
-		log.Fatalf("failed to build Kubernetes configuration: %v", err)
+		appLogger.Fatalf("failed to build Kubernetes configuration: %v", err)
 	}
 
 	istioClient, err := versioned.NewForConfig(cfgKube)
 	if err != nil {
-		log.Fatalf("failed to create Istio clientset: %v", err)
+		appLogger.Fatalf("failed to create Istio clientset: %v", err)
 	}
 
 	clientset, err := kubernetes.NewForConfig(cfgKube)
 	if err != nil {
-		log.Fatalf("failed to create Kubernetes clientset: %v", err)
+		appLogger.Fatalf("failed to create Kubernetes clientset: %v", err)
 	}
 
 	vsCollector := collector.NewVirtualServiceCollector(clientset, istioClient)
@@ -63,10 +66,13 @@ func main() {
 	go vsCollector.Run(ctx, cfg.VirtualServiceInterval)
 
 	for _, target := range cfg.ProductMetrics {
-		var scraperLogger productmetrics.Logger = log.Default()
-		if target.Name != "" {
-			scraperLogger = log.New(os.Stdout, fmt.Sprintf("[%s] ", target.Name), log.LstdFlags)
-		}
+		appLogger.WithField("target", target.Name).Infof("configuring product metrics scraper interval=%s port=%d path=%s namespaceSelector=%q podSelector=%q",
+			target.Interval, target.Port, target.Path, target.NamespaceSelector, target.PodSelector)
+
+		scraperLogger := logrus.WithFields(logrus.Fields{
+			"component": "product-scraper",
+			"target":    target.Name,
+		})
 
 		scraper := productmetrics.NewScraper(
 			target.Name,
@@ -90,28 +96,28 @@ func main() {
 
 		metricFamilies, err := prometheus.DefaultGatherer.Gather()
 		if err != nil {
-			log.Printf("failed to gather Prometheus metrics: %v", err)
+			appLogger.Errorf("failed to gather Prometheus metrics: %v", err)
 			http.Error(w, "failed to gather metrics", http.StatusInternalServerError)
 			return
 		}
 
 		for _, family := range metricFamilies {
 			if err := encoder.Encode(family); err != nil {
-				log.Printf("failed to encode Prometheus metrics: %v", err)
+				appLogger.Errorf("failed to encode Prometheus metrics: %v", err)
 				http.Error(w, "failed to encode metrics", http.StatusInternalServerError)
 				return
 			}
 		}
 
 		if err := store.WriteAll(&buf); err != nil {
-			log.Printf("failed to render product metrics: %v", err)
+			appLogger.Errorf("failed to render product metrics: %v", err)
 			http.Error(w, "failed to render metrics", http.StatusInternalServerError)
 			return
 		}
 
 		w.Header().Set("Content-Type", productmetrics.MetricsContentType)
 		if _, err := w.Write(buf.Bytes()); err != nil {
-			log.Printf("failed to write metrics response: %v", err)
+			appLogger.Warnf("failed to write metrics response: %v", err)
 		}
 	})
 
@@ -129,23 +135,23 @@ func main() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
-			log.Printf("error while shutting down HTTP server: %v", err)
+			appLogger.Warnf("error while shutting down HTTP server: %v", err)
 		}
 		if err := internalSrv.Shutdown(shutdownCtx); err != nil {
-			log.Printf("error while shutting down internal metrics server: %v", err)
+			appLogger.Warnf("error while shutting down internal metrics server: %v", err)
 		}
 	}()
 
 	go func() {
 		if err := internalSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("internal metrics server error: %v", err)
+			appLogger.Errorf("internal metrics server error: %v", err)
 		}
 	}()
 
-	log.Printf("serving metrics at %s/metrics", cfg.ListenAddress)
-	log.Printf("serving Go runtime metrics at %s/metrics", cfg.InternalMetricsAddress)
+	appLogger.Infof("serving metrics at %s/metrics", cfg.ListenAddress)
+	appLogger.Infof("serving Go runtime metrics at %s/metrics", cfg.InternalMetricsAddress)
 
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("HTTP server error: %v", err)
+		appLogger.Fatalf("HTTP server error: %v", err)
 	}
 }
