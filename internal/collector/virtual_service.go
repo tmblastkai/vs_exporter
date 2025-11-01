@@ -7,32 +7,24 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/dynamic"
-)
+	"k8s.io/client-go/kubernetes"
 
-var (
-	virtualServiceGVR = schema.GroupVersionResource{
-		Group:    "networking.istio.io",
-		Version:  "v1beta1",
-		Resource: "virtualservices",
-	}
-	namespaceGVR = schema.GroupVersionResource{
-		Version:  "v1",
-		Resource: "namespaces",
-	}
+	istio "istio.io/client-go/pkg/clientset/versioned"
 )
 
 // VirtualServiceCollector periodically refreshes metrics describing Istio VirtualServices.
 type VirtualServiceCollector struct {
-	client dynamic.Interface
-	metric *prometheus.GaugeVec
+	kubeClient  kubernetes.Interface
+	istioClient istio.Interface
+	metric      *prometheus.GaugeVec
+	updateCount prometheus.Counter
 }
 
-// NewVirtualServiceCollector constructs a VirtualServiceCollector backed by the provided dynamic client.
-func NewVirtualServiceCollector(client dynamic.Interface) *VirtualServiceCollector {
+// NewVirtualServiceCollector constructs a VirtualServiceCollector backed by typed Kubernetes and Istio clients.
+func NewVirtualServiceCollector(kubeClient kubernetes.Interface, istioClient istio.Interface) *VirtualServiceCollector {
 	return &VirtualServiceCollector{
-		client: client,
+		kubeClient:  kubeClient,
+		istioClient: istioClient,
 		metric: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "istio_virtual_service_info",
@@ -40,17 +32,25 @@ func NewVirtualServiceCollector(client dynamic.Interface) *VirtualServiceCollect
 			},
 			[]string{"namespace", "virtual_service"},
 		),
+		updateCount: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "platform_virtualservice_metrics_update",
+				Help: "Total number of VirtualService metric refresh attempts.",
+			},
+		),
 	}
 }
 
 // Describe implements prometheus.Collector.
 func (c *VirtualServiceCollector) Describe(ch chan<- *prometheus.Desc) {
 	c.metric.Describe(ch)
+	c.updateCount.Describe(ch)
 }
 
 // Collect implements prometheus.Collector.
 func (c *VirtualServiceCollector) Collect(ch chan<- prometheus.Metric) {
 	c.metric.Collect(ch)
+	c.updateCount.Collect(ch)
 }
 
 // Run refreshes VirtualService metrics until the context is cancelled.
@@ -75,7 +75,9 @@ func (c *VirtualServiceCollector) Run(ctx context.Context, interval time.Duratio
 }
 
 func (c *VirtualServiceCollector) update(ctx context.Context) error {
-	namespaces, err := c.client.Resource(namespaceGVR).List(ctx, metav1.ListOptions{
+	c.updateCount.Inc()
+
+	namespaces, err := c.kubeClient.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
 		LabelSelector: "product",
 	})
 	if err != nil {
@@ -87,7 +89,7 @@ func (c *VirtualServiceCollector) update(ctx context.Context) error {
 	for _, namespace := range namespaces.Items {
 		nsName := namespace.GetName()
 
-		list, err := c.client.Resource(virtualServiceGVR).Namespace(nsName).List(ctx, metav1.ListOptions{})
+		list, err := c.istioClient.NetworkingV1beta1().VirtualServices(nsName).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return err
 		}
